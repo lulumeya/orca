@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { isTextBlock, type NativeChatMessage } from '../../shared/native-chat-types'
 import { QUEUED_PROMPT_TRACE, QUEUED_PROMPT_TEXT } from './__fixtures__/queued-prompt-trace'
+import { createQueuedPromptAnchor } from './queued-prompt-anchor'
 import { readIncrementalTranscriptMessages } from './transcript-incremental-reader'
 import { readNativeChatTranscript } from './transcript-reader'
 import { nativeChatLineDecoderForAgent } from './transcript-tail-reader'
@@ -94,10 +95,22 @@ describe('a prompt sent while the agent was mid-turn', () => {
       throw new Error('no claude decoder')
     }
 
+    // The watcher carries one anchor across batches, so the appended queued row
+    // can still find the predecessor that arrived in an earlier one.
+    const anchor = createQueuedPromptAnchor()
+
     await writeFile(filePath, `${QUEUED_PROMPT_TRACE.slice(0, split).join('\n')}\n`)
-    const before = await readIncrementalTranscriptMessages(filePath, state, decode)
+    const before = anchor.apply(await readIncrementalTranscriptMessages(filePath, state, decode))
     await appendFile(filePath, `${QUEUED_PROMPT_TRACE.slice(split).join('\n')}\n`)
-    const after = await readIncrementalTranscriptMessages(filePath, state, decode)
+    const after = anchor.apply(await readIncrementalTranscriptMessages(filePath, state, decode))
+
+    // The reader hands back file order either way, so order alone would pass
+    // with the anchoring gone. What it cannot survive is the stamp: the queued
+    // row has to sit past the row it was appended after, not at its own enqueue
+    // time, or a timestamp sort lifts it back above that row.
+    const queued = [...before, ...after].find((m) => textOf(m) === QUEUED_PROMPT_TEXT)
+    const predecessor = [...before, ...after].findLast((m) => m.role === 'tool')
+    expect(queued?.timestamp).toBeGreaterThan(predecessor?.timestamp ?? 0)
 
     expect(conversationTexts([...before, ...after])).toStrictEqual([
       'ASSISTANT_TEXT_1',
